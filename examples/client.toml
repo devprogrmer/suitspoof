@@ -1,47 +1,40 @@
 role = "client"
 
-real_ip = "192.168.1.10"
-peer_real_ip = "203.0.113.10"
+# Real endpoint identities
+real_ip = "YOUR_CLIENT_REAL_IP"
+peer_real_ip = "YOUR_SERVER_REAL_IP"
 
-spoofed_ip = "10.200.1.10"
-peer_spoofed_ip = "10.200.1.20"
-spoofed_ip_pool = ["10.200.1.10", "10.200.1.11", "10.200.1.12"]
+# Spoof / cover identities
+spoofed_ip = "198.51.100.10"
+peer_spoofed_ip = "203.0.113.10"
+spoofed_ip_pool = ["198.51.100.10", "198.51.100.11", "198.51.100.12"]
 
+# Transport
 uplink_protocol = "udp"
 downlink_protocol = "udp"
 data_port = 443
+shuffle_data_port = true
+data_port_min = 20000
+data_port_max = 40000
 
-pre_shared_key = "0123456789abcdef0123456789abcdef"
+# Security
+pre_shared_key = "CHANGE_ME_TO_A_LONG_RANDOM_KEY"
 
-log_level = "info"
-interface = "eth0"
+# TUN
+interface = "suit0"
+tun_ip = "10.88.0.1/30"
+tun_peer_ip = "10.88.0.2"
 
-tun_name = "suit0"
-tun_ip = "10.10.10.1"
-tun_peer_ip = "10.10.10.2"
-tun_netmask = "255.255.255.0"
-
-mtu = 1380
-tun_mtu = 1380
-
-enable_multiplex = true
-multiplex_flush_ms = 5
-multiplex_max_payload = 1200
-
-enable_fec = false
-fec_group_size = 4
-
-packet_padding = true
-packet_padding_max = 64
-ttl_jitter = true
-fake_tls_header = false
-random_dscp = true
-
-enable_xor = false
-xor_key = ""
-
-perf_mode = "balanced"
-auto_tune = true
-
+# Performance
 tunnel_count = 1
-allowed_peers = ["203.0.113.10"]
+mtu = 1380
+enable_multiplex = true
+multiplex_max_streams = 32
+enable_fec = false
+fec_group_size = 8
+
+# Obfuscation / shaping
+packet_padding = true
+ttl_jitter = true
+random_dscp = true
+fake_tls_header = false
