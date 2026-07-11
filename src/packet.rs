@@ -8,7 +8,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
-use crate::packet::{PacketKind, SuitPacket};
+// Assume these are defined in crate::packet
+// enum PacketKind { Syn, Data, Fin, SynAck, Heartbeat, HeartbeatAck }
+// struct SuitPacket { kind: PacketKind, tunnel_id: u32, seq: u32, payload: Bytes }
 
 /// Local port-forward rule.
 ///
@@ -140,14 +142,16 @@ impl PortForwardManager {
 
         // Send SYN (includes target addr as payload).
         let syn_payload = Bytes::from(rule.target_addr.to_string().into_bytes());
+        
         self.send_packet(SuitPacket {
             kind: PacketKind::Syn,
             tunnel_id,
-            seq: 0,
+            seq: 0, // SYN packets typically have seq 0
             payload: syn_payload,
         })
         .await
         .context("failed to send SYN packet")?;
+
 
         let writer_owner = self.clone();
         tokio::spawn(async move {
@@ -162,7 +166,7 @@ impl PortForwardManager {
             writer_owner.remove_tunnel(tunnel_id).await;
         });
 
-        let mut seq: u32 = 1;
+        let mut seq: u32 = 1; // Start data sequence from 1
         let mut buf = vec![0u8; 16 * 1024];
 
         loop {
@@ -176,11 +180,14 @@ impl PortForwardManager {
                 break;
             }
 
+            // Clone the payload for sending, as buf will be reused.
+            let payload = Bytes::copy_from_slice(&buf[..n]);
+
             self.send_packet(SuitPacket {
                 kind: PacketKind::Data,
                 tunnel_id,
                 seq,
-                payload: Bytes::copy_from_slice(&buf[..n]),
+                payload,
             })
             .await
             .with_context(|| format!("failed to send DATA packet for tunnel_id={}", tunnel_id))?;
@@ -188,11 +195,12 @@ impl PortForwardManager {
             seq = seq.wrapping_add(1);
         }
 
+        // Send FIN packet to signal the end of data transmission.
         let _ = self
             .send_packet(SuitPacket {
                 kind: PacketKind::Fin,
                 tunnel_id,
-                seq,
+                seq, // Use the last sequence number for FIN
                 payload: Bytes::new(),
             })
             .await;
@@ -211,6 +219,7 @@ impl PortForwardManager {
                 };
 
                 if let Some(tx) = tx {
+                    // Send the payload directly to the TCP writer task.
                     tx.send(packet.payload)
                         .await
                         .with_context(|| {
@@ -224,24 +233,34 @@ impl PortForwardManager {
                         "port_forward received DATA for unknown tunnel_id={}",
                         packet.tunnel_id
                     );
+                    // Optionally, send a RST or ignore based on desired behavior.
                 }
             }
 
             PacketKind::Fin => {
                 debug!("port_forward received FIN tunnel_id={}", packet.tunnel_id);
+                // Close the corresponding local TCP connection.
                 self.remove_tunnel(packet.tunnel_id).await;
             }
 
             PacketKind::Syn => {
+                // This case should ideally not be hit if the remote side is also using this logic.
+                // SYN packets are sent from the local side to initiate.
+                // If received, it might indicate an unexpected connection initiation from the remote.
                 debug!(
-                    "port_forward received SYN tunnel_id={} payload_len={}",
+                    "port_forward received unexpected SYN tunnel_id={} payload_len={}",
                     packet.tunnel_id,
                     packet.payload.len()
                 );
+                // Optionally, respond with an error or ignore.
             }
 
             PacketKind::SynAck => {
+                // SYN-ACK is typically a response to a SYN.
+                // If received here, it means the remote acknowledged the SYN,
+                // and potentially established the connection.
                 debug!("port_forward received SYN-ACK tunnel_id={}", packet.tunnel_id);
+                // No specific action needed here for the local listener side.
             }
 
             PacketKind::Heartbeat => {
@@ -249,6 +268,7 @@ impl PortForwardManager {
                     "port_forward ignoring HEARTBEAT tunnel_id={}",
                     packet.tunnel_id
                 );
+                // Heartbeats are usually handled at a lower transport level or by a dedicated heartbeat manager.
             }
 
             PacketKind::HeartbeatAck => {
@@ -256,9 +276,32 @@ impl PortForwardManager {
                     "port_forward ignoring HEARTBEAT-ACK tunnel_id={}",
                     packet.tunnel_id
                 );
+                 // Heartbeats are usually handled at a lower transport level or by a dedicated heartbeat manager.
             }
         }
 
         Ok(())
     }
 }
+
+// Dummy definitions for SuitPacket and PacketKind to make the code compile standalone for demonstration.
+// In your actual project, these would be defined in `src/packet.rs`.
+#[derive(Debug, Clone)]
+pub enum PacketKind {
+    Syn,
+    Data,
+    Fin,
+    SynAck,
+    Heartbeat,
+    HeartbeatAck,
+}
+
+#[derive(Debug, Clone)]
+pub struct SuitPacket {
+    pub kind: PacketKind,
+    pub tunnel_id: u32,
+    pub seq: u32,
+    pub payload: Bytes,
+}
+
+// --- End of Dummy definitions ---
