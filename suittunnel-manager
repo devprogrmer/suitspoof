@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-APP_NAME="suit"
+APP_NAME="suittunnel-manage"
 BIN_NAME="suit-tunnel"
 SERVICE_PREFIX="suittunnel"
 
