@@ -1,15 +1,16 @@
+//! Main suitspoof library.
+//!
+//! Exports modules and common functionality used by both the client and server
+//! binaries.
+
 pub mod app;
-pub mod candy_tunnel;
 pub mod check;
-pub mod client;
 pub mod config;
 pub mod logging;
 pub mod mux_fec;
 pub mod packet;
 pub mod port_forward;
-pub mod quic;
 pub mod raw_socket;
-pub mod server;
 pub mod socks5;
 pub mod tun;
 pub mod tun_bridge;
