@@ -13,7 +13,7 @@ use serde::Serialize;
 use sha2::Sha256;
 
 use crate::config::{Config, TunnelProtocol};
-use crate::port_forward::PortForwardRule;
+use crate::port_forward::{self, PortForwardGuard};
 use crate::quic::{spawn_quic_client, spawn_quic_server};
 use crate::raw_socket::{PortFilter, RawReceiver, RawSender};
 use crate::tun::TunDevice;
@@ -471,7 +471,11 @@ async fn run_tun_client(cfg: Arc<Config>, manager: TunnelManager) -> Result<()> 
     let forward_ports = cfg.effective_forward_ports();
     log::debug!("client forward_ports count={}", forward_ports.len());
 
-    let _port_forward = PortForwardRule::apply(&cfg)?;
+    let _port_forward_guard: Option<PortForwardGuard> = if let Some(pf_cfg) = &cfg.port_forward {
+        Some(port_forward::start(pf_cfg.clone(), manager.clone(), cfg.role).await?)
+    } else {
+        None
+    };
 
     let pool = TunnelPool::new();
 
