@@ -356,3 +356,4 @@ sudo nft list ruleset
 
 This project is licensed under the MIT License. See the `LICENSE` file for details.
 `
+This project was just for testing, nothing else.
