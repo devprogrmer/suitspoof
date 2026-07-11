@@ -1,6 +1,6 @@
-//! ChaCha20 stream cipher for suitspoof wire encryption.
-//!
-//! # Why ChaCha20?
+//!rust```
+//! XOR-style framing helper.
+//! [ nonce : 12 bytes ][ ciphertext : N bytes ]
 //!
 //! The previous implementation used SHA-256 CTR which hashes 32 bytes per
 //! block -- roughly one SHA-256 call per 32 bytes of plaintext. ChaCha20 is a
