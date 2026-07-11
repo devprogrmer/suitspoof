@@ -1,9 +1,18 @@
+<<<<<<< HEAD
 name: release
 
 on:
   push:
     tags:
       - "v*"
+=======
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+>>>>>>> 4f3fe65 (Add GitHub Actions build workflow)
   workflow_dispatch:
 
 jobs:
