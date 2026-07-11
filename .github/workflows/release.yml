@@ -11,23 +11,15 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - name: Build (linux amd64)
         run: |
           cargo build --release
           cp target/release/suit suit-linux-amd64
           chmod +x suit-linux-amd64
-
-      - name: Create GitHub Release + upload asset
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: |
-            suit-linux-amd64
+          files: suit-linux-amd64
