@@ -17,9 +17,7 @@ use crate::port_forward::PortForwardGuard;
 use crate::quic::{spawn_quic_client, spawn_quic_server};
 use crate::raw_socket::{PortFilter, RawReceiver, RawSender};
 use crate::tun::TunDevice;
-use crate::tun_bridge::{
-    run_tun_reader, spawn_tun_writer, spawn_tunnel_to_tun, TunnelPool,
-};
+use crate::tun_bridge::{run_tun_reader, spawn_tun_writer, spawn_tunnel_to_tun, TunnelPool};
 use crate::tunnel::{PacketSender, PeerAddr, TunnelManager};
 
 const LICENSE_URL: &str = "http://verify.litelag.ir/verify";
@@ -82,9 +80,9 @@ pub async fn verify_license(password: &str) -> Result<()> {
 pub async fn run_client(cfg: Arc<Config>) -> Result<()> {
     log::info!(
         "suitspoof client starting | real={} spoof={} peer={}",
-        cfg.real_ip,
-        cfg.spoofed_ip,
-        cfg.peer_real_ip
+        cfg.peer_real_ip,
+        cfg.peer_spoofed_ip,
+        cfg.peer_addr
     );
 
     let use_quic = cfg.uplink_protocol == TunnelProtocol::Quic
@@ -102,8 +100,8 @@ pub async fn run_client(cfg: Arc<Config>) -> Result<()> {
     if cfg.uplink_protocol == TunnelProtocol::Tcp && cfg.mux_fec_config().is_enabled() {
         log::warn!("mux/fec is ignored when using tcp transport");
     }
-    if use_quic && cfg.shuffle_data_port {
-        bail!("shuffle_data_port is not supported with quic transport");
+    if use_quic && cfg.data_port_shuffle {
+        bail!("data_port_shuffle is not supported with quic transport");
     }
 
     log::debug!(
@@ -114,7 +112,7 @@ pub async fn run_client(cfg: Arc<Config>) -> Result<()> {
         cfg.mux_fec_config().is_enabled(),
         matches!(cfg.uplink_protocol, TunnelProtocol::Proto58)
             || matches!(cfg.downlink_protocol, TunnelProtocol::Proto58),
-        cfg.shuffle_data_port,
+        cfg.data_port_shuffle,
         cfg.shuffle_port_range()
     );
 
@@ -237,9 +235,9 @@ pub async fn run_server(cfg: Arc<Config>, allow_any: bool) -> Result<()> {
 
     log::info!(
         "suitspoof server starting | real={} spoof={} peer={}",
-        cfg.real_ip,
-        cfg.spoofed_ip,
-        cfg.peer_real_ip
+        cfg.peer_real_ip,
+        cfg.peer_spoofed_ip,
+        cfg.peer_addr
     );
 
     let use_quic = cfg.uplink_protocol == TunnelProtocol::Quic
@@ -257,8 +255,8 @@ pub async fn run_server(cfg: Arc<Config>, allow_any: bool) -> Result<()> {
     if cfg.uplink_protocol == TunnelProtocol::Tcp && cfg.mux_fec_config().is_enabled() {
         log::warn!("mux/fec is ignored when using tcp transport");
     }
-    if use_quic && cfg.shuffle_data_port {
-        bail!("shuffle_data_port is not supported with quic transport");
+    if use_quic && cfg.data_port_shuffle {
+        bail!("data_port_shuffle is not supported with quic transport");
     }
 
     log::debug!(
@@ -269,7 +267,7 @@ pub async fn run_server(cfg: Arc<Config>, allow_any: bool) -> Result<()> {
         cfg.mux_fec_config().is_enabled(),
         matches!(cfg.uplink_protocol, TunnelProtocol::Proto58)
             || matches!(cfg.downlink_protocol, TunnelProtocol::Proto58),
-        cfg.shuffle_data_port,
+        cfg.data_port_shuffle,
         cfg.shuffle_port_range(),
         allow_any
     );
