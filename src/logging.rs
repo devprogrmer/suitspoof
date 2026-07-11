@@ -7,6 +7,6 @@
 //!
 //! Output format (terminal):
 //!
-//!```text
+//!text```
 //! 14:23:01 [INFO ] [app] suitspoof client starting ...
 //! 
