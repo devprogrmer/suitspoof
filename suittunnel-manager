@@ -293,4 +293,239 @@ cmd_configure(){
 
   ask_bool ENABLE_MUX "enable_multiplex?" "y"
   ask MUX_FLUSH "multiplex_flush_ms" "1"
-  ask MUX_PAYLOAD "multip
+  ask MUX_PAYLOAD "multiplex_max_payload" "1380"
+  ask_bool ENABLE_FEC "enable_fec?" "n"
+  ask FEC_GROUP "fec_group_size" "4"
+
+  ask ICMP_ID "icmp_id (decimal or 0x...)" "0x4321"
+  ask_bool RAND_ICMP "random_icmp_id?" "n"
+
+  ask QUIC_SNI "quic_server_name" "suit"
+  ask QUIC_CERT "quic_cert path" "/etc/suittunnel/quic_cert.pem"
+  ask QUIC_KEY "quic_key path" "/etc/suittunnel/quic_key.pem"
+  ask QUIC_ALPN "quic_alpn" "h3"
+  ask QUIC_IDLE "quic_idle_timeout_ms" "30000"
+  ask QUIC_MAX_DATA "quic_max_data" "134217728"
+  ask QUIC_MAX_STREAM_DATA "quic_max_stream_data" "16777216"
+  ask QUIC_MAX_STREAMS_BIDI "quic_max_streams_bidi" "256"
+
+  ask PSK "pre_shared_key (empty => random)" ""
+  [[ -z "${PSK}" ]] && PSK="$(random_hex 24)" && info "Generated pre_shared_key: ${PSK}"
+
+  ask_bool PACKET_PADDING "packet_padding?" "n"
+  ask PACKET_PADDING_MAX "packet_padding_max" "64"
+  ask_bool TTL_JITTER "ttl_jitter?" "n"
+  ask_bool FAKE_TLS "fake_tls_header?" "n"
+  ask_bool RANDOM_DSCP "random_dscp?" "n"
+
+  ask_bool ENABLE_XOR "enable_xor?" "n"
+  ask LOG_LEVEL "log_level (trace/debug/info/warn/error)" "info"
+  ask ALLOWED_PEERS 'allowed_peers (example: "1.1.1.1","2.2.2.2")' ""
+
+  ask PERF_MODE "perf_mode (throughput/latency/balanced)" "throughput"
+  ask_bool AUTO_TUNE "auto_tune?" "y"
+  ask TUNNEL_COUNT "tunnel_count" "4"
+  ask MTU "mtu" "1380"
+  ask CHANNEL_CAP "channel_capacity" "8192"
+  ask IO_CHANNEL_CAP "io_channel_capacity" "16384"
+  ask WORKERS "runtime_worker_threads (0=auto)" "0"
+
+  ask FORWARD_PORTS 'forward_ports (example: 8080,8443)' "8080,8443"
+  ask FORWARD_PORT "forward_port (legacy)" "0"
+
+  ask IFACE "interface" "eth0"
+  ask TUN_NAME "tun_name" "suit0"
+  ask TUN_IP "tun_ip" "$([[ "${ROLE}" == "server" ]] && echo "10.66.0.1" || echo "10.66.0.2")"; validate_ip "${TUN_IP}" || die "Invalid tun_ip"
+  ask TUN_PEER_IP "tun_peer_ip" "$([[ "${ROLE}" == "server" ]] && echo "10.66.0.2" || echo "10.66.0.1")"; validate_ip "${TUN_PEER_IP}" || die "Invalid tun_peer_ip"
+  ask TUN_NETMASK "tun_netmask" "255.255.255.252"; validate_ip "${TUN_NETMASK}" || die "Invalid tun_netmask"
+  ask TUN_MTU "tun_mtu" "1380"
+
+  local cfg="${CONFIG_DIR}/${NAME}.toml"
+  write_config "${cfg}"
+  chmod 640 "${cfg}" || true
+  ok "Wrote config: ${cfg}"
+
+  ensure_service_template
+  systemctl enable "${SERVICE_PREFIX}@${NAME}.service" >/dev/null 2>&1 || true
+  ok "Enabled service: ${SERVICE_PREFIX}@${NAME}.service"
+}
+
+cmd_gen_quic_cert(){
+  require_root
+  need_cmd openssl
+  ensure_dirs
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
+    -keyout "${CONFIG_DIR}/quic_key.pem" \
+    -out "${CONFIG_DIR}/quic_cert.pem" \
+    -days 3650 -subj "/CN=suit"
+  chmod 600 "${CONFIG_DIR}/quic_key.pem" || true
+  chmod 644 "${CONFIG_DIR}/quic_cert.pem" || true
+  ok "Generated QUIC cert/key under ${CONFIG_DIR}"
+}
+
+unit_name(){ echo "${SERVICE_PREFIX}@$1.service"; }
+
+require_instance(){
+  [[ -n "${1:-}" ]] || die "Instance name required."
+  [[ -f "${CONFIG_DIR}/$1.toml" ]] || die "Config not found: ${CONFIG_DIR}/$1.toml"
+}
+
+cmd_start(){ require_root; require_instance "${1:-}"; systemctl start "$(unit_name "$1")"; ok "Started $1"; }
+cmd_stop(){ require_root; require_instance "${1:-}"; systemctl stop "$(unit_name "$1")"; ok "Stopped $1"; }
+cmd_restart(){ require_root; require_instance "${1:-}"; systemctl restart "$(unit_name "$1")"; ok "Restarted $1"; }
+cmd_enable(){ require_root; require_instance "${1:-}"; ensure_service_template; systemctl enable "$(unit_name "$1")"; ok "Enabled $1"; }
+cmd_disable(){ require_root; require_instance "${1:-}"; systemctl disable "$(unit_name "$1")"; ok "Disabled $1"; }
+
+cmd_logs(){
+  local n="${1:-}" lines="${2:-100}"
+  [[ -n "${n}" ]] || die "Usage: $0 logs <name> [lines]"
+  journalctl -u "$(unit_name "${n}")" -n "${lines}" --no-pager
+}
+
+cmd_follow(){
+  local n="${1:-}"
+  [[ -n "${n}" ]] || die "Usage: $0 follow <name>"
+  journalctl -u "$(unit_name "${n}")" -f
+}
+
+cmd_status(){
+  echo "== Binary =="
+  if [[ -x "${BIN_PATH}" ]]; then
+    echo "installed: yes"
+    echo "version: $(cat "${VERSION_FILE}" 2>/dev/null || echo unknown)"
+  else
+    echo "installed: no"
+  fi
+
+  echo
+  echo "== Instances =="
+  shopt -s nullglob
+  local f n
+  for f in "${CONFIG_DIR}"/*.toml; do
+    n="$(basename "${f}" .toml)"
+    systemctl is-active --quiet "$(unit_name "${n}")" && echo "${n}: active" || echo "${n}: inactive"
+  done
+  shopt -u nullglob
+}
+
+cmd_list(){
+  shopt -s nullglob
+  local f
+  for f in "${CONFIG_DIR}"/*.toml; do
+    basename "${f}" .toml
+  done
+  shopt -u nullglob
+}
+
+cmd_check(){
+  require_root
+  need_cmd ip systemctl
+  echo "== System check =="
+  echo "kernel: $(uname -r)"
+  echo "ip_forward: $(cat /proc/sys/net/ipv4/ip_forward)"
+  echo "binary: $([[ -x "${BIN_PATH}" ]] && echo OK || echo MISSING)"
+  echo "config_dir: $([[ -d "${CONFIG_DIR}" ]] && echo OK || echo MISSING)"
+  echo "service_template: $([[ -f "${SYSTEMD_DIR}/${SERVICE_PREFIX}@.service" ]] && echo OK || echo MISSING)"
+}
+
+cmd_remove(){
+  require_root
+  local n="${1:-}"
+  [[ -n "${n}" ]] || die "Usage: $0 remove <name>"
+  systemctl stop "$(unit_name "${n}")" 2>/dev/null || true
+  systemctl disable "$(unit_name "${n}")" 2>/dev/null || true
+  rm -f "${CONFIG_DIR}/${n}.toml}"
+  ok "Removed instance ${n}"
+}
+
+cmd_uninstall(){
+  require_root
+  local keep_cfg="${1:-keep-config}"
+
+  mapfile -t units < <(systemctl list-unit-files --type=service --no-legend \
+    | awk '{print $1}' | grep "^${SERVICE_PREFIX}@.*\.service$" || true)
+
+  for u in "${units[@]:-}"; do
+    systemctl stop "${u}" 2>/dev/null || true
+    systemctl disable "${u}" 2>/dev/null || true
+  done
+
+  rm -f "${SYSTEMD_DIR}/${SERVICE_PREFIX}@.service"
+  systemctl daemon-reload
+
+  rm -f "/usr/local/bin/${BIN_NAME}"
+  rm -rf "${INSTALL_DIR}" "${STATE_DIR}" "${LOG_DIR}"
+
+  if [[ "${keep_cfg}" == "purge" ]]; then
+    rm -rf "${CONFIG_DIR}"
+    ok "Uninstalled (including configs)."
+  else
+    ok "Uninstalled (configs kept at ${CONFIG_DIR})."
+  fi
+}
+
+cmd_setup(){
+  require_root
+  need_cmd curl systemctl ip awk sed grep xxd head openssl
+  ensure_dirs
+  [[ -x "${BIN_PATH}" ]] || cmd_download
+  cmd_configure
+  info "You can now: $0 start <instance>"
+}
+
+cmd_help(){
+  cat <<EOF
+${APP_NAME} Manager
+
+Usage:
+  sudo $0 setup
+  sudo $0 download
+  sudo $0 update
+  sudo $0 configure
+  sudo $0 gen-quic-cert
+
+  sudo $0 start <name>
+  sudo $0 stop <name>
+  sudo $0 restart <name>
+  sudo $0 enable <name>
+  sudo $0 disable <name>
+  sudo $0 remove <name>
+
+  sudo $0 status
+  sudo $0 list
+  sudo $0 logs <name> [lines]
+  sudo $0 follow <name>
+  sudo $0 check
+
+  sudo $0 uninstall [keep-config|purge]
+EOF
+}
+
+main(){
+  local cmd="${1:-help}"
+  shift || true
+
+  case "${cmd}" in
+    setup) cmd_setup "$@" ;;
+    download) cmd_download "$@" ;;
+    update) cmd_update "$@" ;;
+    configure) cmd_configure "$@" ;;
+    gen-quic-cert) cmd_gen_quic_cert "$@" ;;
+    start) cmd_start "$@" ;;
+    stop) cmd_stop "$@" ;;
+    restart) cmd_restart "$@" ;;
+    enable) cmd_enable "$@" ;;
+    disable) cmd_disable "$@" ;;
+    remove) cmd_remove "$@" ;;
+    status) cmd_status "$@" ;;
+    list) cmd_list "$@" ;;
+    logs) cmd_logs "$@" ;;
+    follow) cmd_follow "$@" ;;
+    check) cmd_check "$@" ;;
+    uninstall) cmd_uninstall "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *) die "Unknown command: ${cmd}. Run: $0 help" ;;
+  esac
+}
+
+main "$@"
