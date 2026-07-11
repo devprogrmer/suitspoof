@@ -1,1 +1,47 @@
+role = "server"
 
+real_ip = "203.0.113.10"
+peer_real_ip = "192.168.1.10"
+
+spoofed_ip = "10.200.1.20"
+peer_spoofed_ip = "10.200.1.10"
+spoofed_ip_pool = ["10.200.1.20", "10.200.1.21", "10.200.1.22"]
+
+uplink_protocol = "udp"
+downlink_protocol = "udp"
+data_port = 443
+
+pre_shared_key = "0123456789abcdef0123456789abcdef"
+
+log_level = "info"
+interface = "eth0"
+
+tun_name = "suit0"
+tun_ip = "10.10.10.2"
+tun_peer_ip = "10.10.10.1"
+tun_netmask = "255.255.255.0"
+
+mtu = 1380
+tun_mtu = 1380
+
+enable_multiplex = true
+multiplex_flush_ms = 5
+multiplex_max_payload = 1200
+
+enable_fec = false
+fec_group_size = 4
+
+packet_padding = true
+packet_padding_max = 64
+ttl_jitter = true
+fake_tls_header = false
+random_dscp = true
+
+enable_xor = false
+xor_key = ""
+
+perf_mode = "balanced"
+auto_tune = true
+
+tunnel_count = 1
+allowed_peers = ["192.168.1.10"]
