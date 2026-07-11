@@ -28,7 +28,6 @@ impl TryFrom<u8> for PacketKind {
     }
 }
 
-// Suit packet format:
 // [magic:4][version:1][kind:1][tunnel_id:4][seq:4][payload...]
 const CURRENT_PROTOCOL_VERSION: u8 = 0x01;
 const MAGIC: u32 = 0x5B005B00;
