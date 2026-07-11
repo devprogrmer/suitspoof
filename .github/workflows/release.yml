@@ -28,11 +28,8 @@ jobs:
         run: |
           set -euxo pipefail
           cargo build --release
-
-          # pick produced binary (fallback-safe)
           BIN_PATH="$(find target/release -maxdepth 1 -type f -executable ! -name '*.d' ! -name 'build-script-*' | head -n1)"
           test -n "$BIN_PATH"
-
           cp "$BIN_PATH" suit-linux-amd64
           chmod +x suit-linux-amd64
           ls -lh suit-linux-amd64
