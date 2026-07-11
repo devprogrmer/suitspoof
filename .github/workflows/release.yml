@@ -40,11 +40,7 @@ jobs:
       - name: Build (release)
         run: |
           set -euxo pipefail
-<<<<<<< HEAD
           cargo build --release --verbose
-=======
-          cargo build --release
->>>>>>> a29a33e (ci: restore valid release workflow)
           BIN_PATH="$(find target/release -maxdepth 1 -type f -executable ! -name '*.d' ! -name 'build-script-*' | head -n1)"
           test -n "$BIN_PATH"
           cp "$BIN_PATH" suit-linux-amd64
