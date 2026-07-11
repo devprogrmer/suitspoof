@@ -16,3 +16,5 @@ pub mod tuning;
 pub mod tunnel;
 pub mod xor;
 
+#[cfg(test)]
+mod tests {}
