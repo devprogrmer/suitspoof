@@ -8,11 +8,11 @@ use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
 use pnet_packet::tcp::TcpFlags;
-use tokio::sync::{Mutex, Semaphore, oneshot};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::{oneshot, Mutex, Semaphore};
 
 use crate::config::{Config, TunnelProtocol};
-use crate::packet::{CandyPacket, PacketKind};
+use crate::packet::{PacketKind, SuitPacket};
 use crate::raw_socket::{InPacket, OutPacket, PortFilter, RawReceiver, RawSender};
 
 #[derive(Debug, Clone)]
@@ -24,7 +24,9 @@ pub struct CheckOptions {
 }
 
 pub async fn run_spoof_check(cfg: Arc<Config>, opts: CheckOptions) -> Result<()> {
-    if cfg.uplink_protocol == TunnelProtocol::Quic || cfg.downlink_protocol == TunnelProtocol::Quic {
+    if cfg.uplink_protocol == TunnelProtocol::Quic
+        || cfg.downlink_protocol == TunnelProtocol::Quic
+    {
         bail!("check mode is not supported with quic transport");
     }
 
@@ -33,14 +35,24 @@ pub async fn run_spoof_check(cfg: Arc<Config>, opts: CheckOptions) -> Result<()>
         bail!("no IPs found in {}", opts.ips_path);
     }
 
-    log::info!("check start ips={} timeout_ms={} workers={}", ips.len(), opts.timeout.as_millis(), opts.workers);
+    log::info!(
+        "check start ips={} timeout_ms={} workers={}",
+        ips.len(),
+        opts.timeout.as_millis(),
+        opts.workers
+    );
 
-    let sender = RawSender::spawn(cfg.io_channel_capacity, cfg.xor_cipher(), cfg.dpi_obfuscation())?;
+    let sender = RawSender::spawn(
+        cfg.io_channel_capacity,
+        cfg.xor_cipher(),
+        cfg.dpi_obfuscation,
+    )?;
 
     let data_ports = cfg.build_data_port_pool()?;
     if let Some(ports) = &data_ports {
         log::debug!("check shuffle pool size={}", ports.len());
     }
+
     let port_filter = PortFilter::new(
         cfg.data_port,
         data_ports.clone(),
@@ -60,11 +72,12 @@ pub async fn run_spoof_check(cfg: Arc<Config>, opts: CheckOptions) -> Result<()>
         cfg.mux_fec_config(),
         cfg.io_channel_capacity,
         cfg.xor_cipher(),
-        cfg.dpi_obfuscation(),
+        cfg.dpi_obfuscation,
     )?;
 
     let pending: Arc<DashMap<u32, oneshot::Sender<Instant>>> = Arc::new(DashMap::new());
     let pending_rx = pending.clone();
+
     tokio::spawn(async move {
         while let Some(pkt) = receiver.recv().await {
             handle_incoming(pkt, &pending_rx);
@@ -93,10 +106,13 @@ pub async fn run_spoof_check(cfg: Arc<Config>, opts: CheckOptions) -> Result<()>
         let file_err = file.clone();
         let timeout = opts.timeout;
         let data_ports = data_ports.clone();
+
         tasks.push(tokio::spawn(async move {
             let _permit = permit;
             log::trace!("check ip start={}", ip);
-            if let Err(e) = check_one_ip(cfg, sender, pending, file, ip, timeout, &data_ports).await {
+
+            if let Err(e) = check_one_ip(cfg, sender, pending, file, ip, timeout, &data_ports).await
+            {
                 log::warn!("check {} failed: {}", ip, e);
                 let mut f = file_err.lock().await;
                 let _ = f.write_all(format!("{} error\n", ip).as_bytes()).await;
@@ -117,6 +133,7 @@ fn handle_incoming(pkt: InPacket, pending: &DashMap<u32, oneshot::Sender<Instant
     if pkt.pkt.kind != PacketKind::SynAck {
         return;
     }
+
     if let Some((_, tx)) = pending.remove(&pkt.pkt.tunnel_id) {
         let _ = tx.send(Instant::now());
     }
@@ -133,7 +150,7 @@ async fn check_one_ip(
 ) -> Result<()> {
     let tunnel_id: u32 = rand::random();
     let seq: u32 = rand::random();
-    let syn = CandyPacket::new_syn(tunnel_id, seq);
+    let syn = SuitPacket::new_syn(tunnel_id, seq);
 
     let (tx, rx) = oneshot::channel();
     pending.insert(tunnel_id, tx);
@@ -156,7 +173,11 @@ async fn check_one_ip(
     Ok(())
 }
 
-async fn write_result(file: &Arc<Mutex<tokio::fs::File>>, ip: Ipv4Addr, latency_ms: Option<u64>) -> Result<()> {
+async fn write_result(
+    file: &Arc<Mutex<tokio::fs::File>>,
+    ip: Ipv4Addr,
+    latency_ms: Option<u64>,
+) -> Result<()> {
     let mut f = file.lock().await;
     let line = match latency_ms {
         Some(ms) => format!("{} {}\n", ip, ms),
@@ -175,6 +196,7 @@ fn build_out_packet(
     data_ports: &Option<std::sync::Arc<Vec<u16>>>,
 ) -> Result<OutPacket> {
     let data_port = crate::config::pick_data_port(cfg.data_port, data_ports);
+
     match cfg.uplink_protocol {
         TunnelProtocol::Udp => Ok(OutPacket::Udp {
             src_ip: spoof_ip,
@@ -183,15 +205,13 @@ fn build_out_packet(
             dst_port: data_port,
             payload,
         }),
-        TunnelProtocol::Icmp => {
-            Ok(OutPacket::Icmp {
-                src_ip: spoof_ip,
-                dst_ip: cfg.peer_real_ip,
-                id: cfg.pick_icmp_id(),
-                seq: (seq & 0xffff) as u16,
-                payload,
-            })
-        }
+        TunnelProtocol::Icmp => Ok(OutPacket::Icmp {
+            src_ip: spoof_ip,
+            dst_ip: cfg.peer_real_ip,
+            id: cfg.pick_icmp_id(),
+            seq: (seq & 0xffff) as u16,
+            payload,
+        }),
         TunnelProtocol::Proto58 => Ok(OutPacket::Proto58 {
             src_ip: spoof_ip,
             dst_ip: cfg.peer_real_ip,
@@ -222,8 +242,8 @@ fn build_out_packet(
 }
 
 fn read_ip_list(path: &str) -> Result<Vec<Ipv4Addr>> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path))?;
+    let content = std::fs::read_to_string(path).with_context(|| format!("read {}", path))?;
+
     let mut out = Vec::new();
     for line in content.lines() {
         let line = line.trim();
@@ -234,5 +254,6 @@ fn read_ip_list(path: &str) -> Result<Vec<Ipv4Addr>> {
             out.push(ip);
         }
     }
+
     Ok(out)
 }
