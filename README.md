@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Release](https://github.com/devprogrmer/suitspoof/actions/workflows/release.yml/badge.svg)](https://github.com/devprogrmer/suitspoof/actions/workflows/release.yml)
 
-Operational toolkit for deploying and managing **SuitTunnel** (formerly CandyTunnel), an IP-spoofing-focused tunneling system for filtered or unstable networks.
+Operational toolkit for deploying and managing **SuitTunnel** , an IP-spoofing-focused tunneling system for filtered or unstable networks.
 
 ---
 
