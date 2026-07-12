@@ -53,11 +53,11 @@ impl Drop for TunFd {
 #[cfg(target_os = "linux")]
 pub struct TunDevice {
     name: String,
-    mtu:  usize,
+    mtu: usize,
     /// Receives raw IP packets read from the TUN fd by the background thread.
-    rx:   mpsc::Receiver<Bytes>,
+    rx: mpsc::Receiver<Bytes>,
     /// Sends raw IP packets to the background thread for writing to the TUN fd.
-    tx:   mpsc::Sender<Bytes>,
+    tx: mpsc::Sender<Bytes>,
 }
 
 /// Channel capacity for TUN reader/writer threads.
@@ -99,9 +99,9 @@ impl TunDevice {
             mtu
         );
 
-        // Background reader
+        // ── Background reader ──────────────────────────────────────────────
         // Duplicates the fd so the reader thread owns its copy independently.
-        let read_fd  = unsafe { libc::dup(fd) };
+        let read_fd = unsafe { libc::dup(fd) };
         let (pkt_tx, pkt_rx): (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) =
             mpsc::bounded(TUN_CHANNEL_CAP);
         let read_mtu = mtu;
@@ -111,11 +111,7 @@ impl TunDevice {
                 let mut buf = vec![0u8; read_mtu + 128];
                 loop {
                     let n = unsafe {
-                        libc::read(
-                            read_fd,
-                            buf.as_mut_ptr() as *mut libc::c_void,
-                            buf.len(),
-                        )
+                        libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
                     };
                     if n < 0 {
                         let e = io::Error::last_os_error();
@@ -134,7 +130,7 @@ impl TunDevice {
             })
             .context("spawn tun-read thread")?;
 
-        // Background writer
+        // ── Background writer ──────────────────────────────────────────────
         let write_fd = unsafe { libc::dup(fd) };
         let (write_tx, write_rx): (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) =
             mpsc::bounded(TUN_CHANNEL_CAP);
@@ -161,7 +157,7 @@ impl TunDevice {
             })
             .context("spawn tun-write thread")?;
 
-        // Close original fd - the dup'd copies are owned by the threads.
+        // Close original fd – the dup'd copies are owned by the threads.
         unsafe { libc::close(fd) };
 
         Ok(Self {
@@ -172,8 +168,12 @@ impl TunDevice {
         })
     }
 
-    pub fn name(&self) -> &str { &self.name }
-    pub fn mtu(&self) -> usize { self.mtu }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn mtu(&self) -> usize {
+        self.mtu
+    }
 
     /// Read a single IP packet from the TUN device.
     ///
@@ -215,8 +215,12 @@ impl TunDevice {
         bail!("TUN is supported only on Linux")
     }
 
-    pub fn name(&self) -> &str { "" }
-    pub fn mtu(&self) -> usize { 0 }
+    pub fn name(&self) -> &str {
+        ""
+    }
+    pub fn mtu(&self) -> usize {
+        0
+    }
 
     pub async fn read_packet(&self) -> Result<Bytes> {
         bail!("TUN is supported only on Linux")
@@ -246,8 +250,7 @@ fn attach_tun(fd: RawFd, name: &str) -> Result<String> {
 
     let res = unsafe { libc::ioctl(fd, TUNSETIFF, &ifr) };
     if res < 0 {
-        return Err(io::Error::last_os_error())
-            .context("ioctl(TUNSETIFF) failed");
+        return Err(io::Error::last_os_error()).context("ioctl(TUNSETIFF) failed");
     }
 
     let if_name = unsafe { CStr::from_ptr(ifr.ifr_name.as_ptr()) }
@@ -256,6 +259,7 @@ fn attach_tun(fd: RawFd, name: &str) -> Result<String> {
     Ok(if_name)
 }
 
+#[cfg(target_os = "linux")]
 #[cfg(target_os = "linux")]
 fn configure_interface(
     if_name: &str,
@@ -307,15 +311,16 @@ fn set_if_addr(sock: RawFd, name: &str, addr: Ipv4Addr) -> Result<()> {
 
     let mut sin: libc::sockaddr_in = unsafe { mem::zeroed() };
     sin.sin_family = libc::AF_INET as libc::sa_family_t;
-    sin.sin_addr = libc::in_addr { s_addr: u32::from(addr).to_be() };
+    sin.sin_addr = libc::in_addr {
+        s_addr: u32::from(addr).to_be(),
+    };
 
     unsafe {
         let dst = &mut ifr.ifr_ifru.ifru_addr as *mut _ as *mut libc::sockaddr_in;
         *dst = sin;
     }
 
-    ioctl_ifreq(sock, libc::SIOCSIFADDR as libc::c_ulong, &mut ifr)
-        .context("SIOCSIFADDR")
+    ioctl_ifreq(sock, libc::SIOCSIFADDR as libc::c_ulong, &mut ifr).context("SIOCSIFADDR")
 }
 
 #[cfg(target_os = "linux")]
@@ -325,15 +330,16 @@ fn set_if_netmask(sock: RawFd, name: &str, netmask: Ipv4Addr) -> Result<()> {
 
     let mut sin: libc::sockaddr_in = unsafe { mem::zeroed() };
     sin.sin_family = libc::AF_INET as libc::sa_family_t;
-    sin.sin_addr = libc::in_addr { s_addr: u32::from(netmask).to_be() };
+    sin.sin_addr = libc::in_addr {
+        s_addr: u32::from(netmask).to_be(),
+    };
 
     unsafe {
         let dst = &mut ifr.ifr_ifru.ifru_netmask as *mut _ as *mut libc::sockaddr_in;
         *dst = sin;
     }
 
-    ioctl_ifreq(sock, libc::SIOCSIFNETMASK as libc::c_ulong, &mut ifr)
-        .context("SIOCSIFNETMASK")
+    ioctl_ifreq(sock, libc::SIOCSIFNETMASK as libc::c_ulong, &mut ifr).context("SIOCSIFNETMASK")
 }
 
 #[cfg(target_os = "linux")]
@@ -343,15 +349,16 @@ fn set_if_dstaddr(sock: RawFd, name: &str, dst: Ipv4Addr) -> Result<()> {
 
     let mut sin: libc::sockaddr_in = unsafe { mem::zeroed() };
     sin.sin_family = libc::AF_INET as libc::sa_family_t;
-    sin.sin_addr = libc::in_addr { s_addr: u32::from(dst).to_be() };
+    sin.sin_addr = libc::in_addr {
+        s_addr: u32::from(dst).to_be(),
+    };
 
     unsafe {
         let out = &mut ifr.ifr_ifru.ifru_dstaddr as *mut _ as *mut libc::sockaddr_in;
         *out = sin;
     }
 
-    ioctl_ifreq(sock, libc::SIOCSIFDSTADDR as libc::c_ulong, &mut ifr)
-        .context("SIOCSIFDSTADDR")
+    ioctl_ifreq(sock, libc::SIOCSIFDSTADDR as libc::c_ulong, &mut ifr).context("SIOCSIFDSTADDR")
 }
 
 #[cfg(target_os = "linux")]
@@ -359,8 +366,8 @@ fn set_if_mtu(sock: RawFd, name: &str, mtu: usize) -> Result<()> {
     let mut ifr: libc::ifreq = unsafe { mem::zeroed() };
     set_ifr_name(&mut ifr, name)?;
     ifr.ifr_ifru.ifru_mtu = mtu as libc::c_int;
-    ioctl_ifreq(sock, libc::SIOCSIFMTU as libc::c_ulong, &mut ifr)
-        .context("SIOCSIFMTU")
+
+    ioctl_ifreq(sock, libc::SIOCSIFMTU as libc::c_ulong, &mut ifr).context("SIOCSIFMTU")
 }
 
 #[cfg(target_os = "linux")]
@@ -368,15 +375,13 @@ fn set_if_up(sock: RawFd, name: &str) -> Result<()> {
     let mut ifr: libc::ifreq = unsafe { mem::zeroed() };
     set_ifr_name(&mut ifr, name)?;
 
-    ioctl_ifreq(sock, libc::SIOCGIFFLAGS as libc::c_ulong, &mut ifr)
-        .context("SIOCGIFFLAGS")?;
+    ioctl_ifreq(sock, libc::SIOCGIFFLAGS as libc::c_ulong, &mut ifr).context("SIOCGIFFLAGS")?;
 
     let flags = unsafe { ifr.ifr_ifru.ifru_flags };
     let new_flags = flags | (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
     ifr.ifr_ifru.ifru_flags = new_flags;
 
-    ioctl_ifreq(sock, libc::SIOCSIFFLAGS as libc::c_ulong, &mut ifr)
-        .context("SIOCSIFFLAGS")
+    ioctl_ifreq(sock, libc::SIOCSIFFLAGS as libc::c_ulong, &mut ifr).context("SIOCSIFFLAGS")
 }
 
 #[cfg(target_os = "linux")]

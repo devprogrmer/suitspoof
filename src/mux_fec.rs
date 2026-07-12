@@ -1,9 +1,15 @@
+//! Multiplexing and FEC layer for UDP/ICMP transports.
+//!
+//! This layer batches multiple CandyPacket payloads into a single wire frame
+//! (multiplexing) and optionally adds XOR parity frames (FEC). It is not used
+//! for QUIC.
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use async_channel as mpsc;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures_lite::future;
 
 use crate::packet::CandyPacket;
@@ -86,13 +92,16 @@ impl FecDecoder {
     }
 
     pub(crate) fn on_data(&mut self, frame: &DataFrame) -> Vec<Bytes> {
-        let group = self.groups.entry(frame.group_id).or_insert_with(|| GroupState {
-            group_size: frame.group_size,
-            data: vec![None; frame.group_size as usize],
-            lengths: None,
-            parity: None,
-            created: Instant::now(),
-        });
+        let group = self
+            .groups
+            .entry(frame.group_id)
+            .or_insert_with(|| GroupState {
+                group_size: frame.group_size,
+                data: vec![None; frame.group_size as usize],
+                lengths: None,
+                parity: None,
+                created: Instant::now(),
+            });
 
         if frame.group_size != group.group_size {
             self.groups.remove(&frame.group_id);
@@ -107,13 +116,16 @@ impl FecDecoder {
     }
 
     pub(crate) fn on_parity(&mut self, frame: &ParityFrame) -> Vec<Bytes> {
-        let group = self.groups.entry(frame.group_id).or_insert_with(|| GroupState {
-            group_size: frame.group_size,
-            data: vec![None; frame.group_size as usize],
-            lengths: Some(frame.lengths.clone()),
-            parity: Some(frame.parity.clone()),
-            created: Instant::now(),
-        });
+        let group = self
+            .groups
+            .entry(frame.group_id)
+            .or_insert_with(|| GroupState {
+                group_size: frame.group_size,
+                data: vec![None; frame.group_size as usize],
+                lengths: Some(frame.lengths.clone()),
+                parity: Some(frame.parity.clone()),
+                created: Instant::now(),
+            });
 
         if frame.group_size != group.group_size {
             self.groups.remove(&frame.group_id);
@@ -127,9 +139,15 @@ impl FecDecoder {
     }
 
     fn try_recover(&mut self, group_id: u32) -> Vec<Bytes> {
-        let Some(group) = self.groups.get(&group_id) else { return Vec::new(); };
-        let Some(lengths) = &group.lengths else { return Vec::new(); };
-        let Some(parity) = &group.parity else { return Vec::new(); };
+        let Some(group) = self.groups.get(&group_id) else {
+            return Vec::new();
+        };
+        let Some(lengths) = &group.lengths else {
+            return Vec::new();
+        };
+        let Some(parity) = &group.parity else {
+            return Vec::new();
+        };
 
         let mut missing = None;
         for (idx, item) in group.data.iter().enumerate() {
@@ -141,7 +159,9 @@ impl FecDecoder {
             }
         }
 
-        let Some(missing_idx) = missing else { return Vec::new(); };
+        let Some(missing_idx) = missing else {
+            return Vec::new();
+        };
         let max_len = lengths.iter().copied().max().unwrap_or(0) as usize;
         if max_len == 0 {
             self.groups.remove(&group_id);
@@ -155,7 +175,9 @@ impl FecDecoder {
             if idx == missing_idx {
                 continue;
             }
-            let Some(frame) = item else { continue; };
+            let Some(frame) = item else {
+                continue;
+            };
             for (i, b) in frame.iter().enumerate() {
                 buf[i] ^= b;
             }
@@ -169,9 +191,15 @@ impl FecDecoder {
 
     pub fn prune(&mut self, max_age: Duration) {
         let now = Instant::now();
-        self.groups.retain(|_, g| now.duration_since(g.created) < max_age);
+        self.groups
+            .retain(|_, g| now.duration_since(g.created) < max_age);
         if self.groups.len() > self.max_groups {
-            let keys: Vec<u32> = self.groups.keys().take(self.groups.len() / 2).copied().collect();
+            let keys: Vec<u32> = self
+                .groups
+                .keys()
+                .take(self.groups.len() / 2)
+                .copied()
+                .collect();
             for k in keys {
                 self.groups.remove(&k);
             }
@@ -210,11 +238,7 @@ pub fn encode_data_frame(
     Ok(buf.freeze())
 }
 
-pub fn encode_parity_frame(
-    group_id: u32,
-    group_size: u8,
-    frames: &[Bytes],
-) -> Result<Bytes> {
+pub fn encode_parity_frame(group_id: u32, group_size: u8, frames: &[Bytes]) -> Result<Bytes> {
     if frames.len() != group_size as usize {
         bail!("parity frames length mismatch");
     }
@@ -313,7 +337,10 @@ pub(crate) fn decode_payload(payload: Bytes) -> Result<WireFrame> {
     }))
 }
 
-pub(crate) fn decode_packets_from_frame(frame: WireFrame, fec: Option<&mut FecDecoder>) -> Result<Vec<CandyPacket>> {
+pub(crate) fn decode_packets_from_frame(
+    frame: WireFrame,
+    fec: Option<&mut FecDecoder>,
+) -> Result<Vec<CandyPacket>> {
     let mut out = Vec::new();
     match frame {
         WireFrame::Data(df) => {
@@ -414,7 +441,12 @@ struct Encoder {
 }
 
 impl Encoder {
-    fn new(cfg: MuxFecConfig, sender: RawSender, addr: PeerAddr, protocol: crate::config::TunnelProtocol) -> Self {
+    fn new(
+        cfg: MuxFecConfig,
+        sender: RawSender,
+        addr: PeerAddr,
+        protocol: crate::config::TunnelProtocol,
+    ) -> Self {
         Self {
             cfg,
             sender,
@@ -473,97 +505,116 @@ impl Encoder {
             let _ = self.flush_batch().await;
         }
 
-        self.batch_size += packet_mux_size(&pkt);
+        self.batch_size = estimate_mux_size_with_packet(&self.batch, &pkt);
         self.batch.push(pkt);
 
-        if self.batch.len() as u8 == self.cfg.fec_group_size {
+        if self.batch_size >= self.cfg.multiplex_max_payload {
             let _ = self.flush_batch().await;
         }
-    }
-
-    async fn send_frame(&mut self, packets: Vec<Bytes>) -> Result<()> {
-        if packets.is_empty() {
-            return Ok(());
-        }
-
-        let num_packets = packets.len() as u8;
-        let group_id = self.group_id;
-        let group_size = self.cfg.fec_group_size;
-
-        for (idx, p) in packets.into_iter().enumerate() {
-            let frame = encode_data_frame(&[p], group_id, group_size, idx as u8)?;
-            self.group_frames.push(frame.clone());
-            let out = self.build_out_packet(frame)?;
-            self.sender.send(out).await?;
-        }
-
-        if self.cfg.enable_fec && num_packets == group_size {
-            let parity_frame = encode_parity_frame(group_id, group_size, &self.group_frames)?;
-            let out = self.build_out_packet(parity_frame)?;
-            self.sender.send(out).await?;
-        }
-
-        self.group_frames.clear();
-        self.group_id = rand::random();
-        Ok(())
     }
 
     async fn flush_batch(&mut self) -> Result<()> {
         if self.batch.is_empty() {
             return Ok(());
         }
-        let batch_to_send = self.batch.drain(..).collect();
-        self.batch_size = 0;
 
-        let _ = self.send_frame(batch_to_send).await;
+        let packets = std::mem::take(&mut self.batch);
+        self.batch_size = 0;
+        self.send_frame(packets).await
+    }
+
+    async fn send_frame(&mut self, packets: Vec<Bytes>) -> Result<()> {
+        let group_size = if self.cfg.enable_fec {
+            self.cfg.fec_group_size
+        } else {
+            1
+        };
+        let index = self.group_frames.len() as u8;
+        log::trace!(
+            "mux_fec send_frame group_id={} index={} packets={} fec={}",
+            self.group_id,
+            index,
+            packets.len(),
+            self.cfg.enable_fec
+        );
+        let frame = encode_data_frame(&packets, self.group_id, group_size, index)?;
+        self.send_wire(frame.clone()).await?;
+
+        if self.cfg.enable_fec {
+            self.group_frames.push(frame);
+            if self.group_frames.len() == self.cfg.fec_group_size as usize {
+                let parity = encode_parity_frame(
+                    self.group_id,
+                    self.cfg.fec_group_size,
+                    &self.group_frames,
+                )?;
+                self.send_wire(parity).await?;
+                self.group_frames.clear();
+                self.group_id = self.group_id.wrapping_add(1);
+            }
+        }
 
         Ok(())
     }
 
-    fn build_out_packet(&self, frame: Bytes) -> Result<Bytes> {
-        match self.protocol {
-            crate::config::TunnelProtocol::Udp => {
-                let mut out_packet = OutPacket {
-                    payload: frame,
-                    dst: self.addr,
-                    src: None,
-                    icmp_seq: None,
-                };
-                 Ok(frame)
-            }
+    async fn send_wire(&mut self, payload: Bytes) -> Result<()> {
+        let out = match self.protocol {
+            crate::config::TunnelProtocol::Udp => OutPacket::Udp {
+                src_ip: self.addr.local_spoof,
+                dst_ip: self.addr.peer_real,
+                src_port: self.addr.pick_data_port(),
+                dst_port: self.addr.pick_data_port(),
+                payload,
+            },
             crate::config::TunnelProtocol::Icmp => {
-                 let mut out_packet = OutPacket {
-                    payload: frame,
-                    dst: self.addr,
-                    src: None,
-                    icmp_seq: Some(self.icmp_seq),
-                };
-                 Ok(frame)
+                let seq = self.icmp_seq;
+                self.icmp_seq = self.icmp_seq.wrapping_add(1);
+                OutPacket::Icmp {
+                    src_ip: self.addr.local_spoof,
+                    dst_ip: self.addr.peer_real,
+                    id: self.addr.pick_icmp_id(),
+                    seq,
+                    payload,
+                }
             }
-        }
+            crate::config::TunnelProtocol::Proto58 => OutPacket::Proto58 {
+                src_ip: self.addr.local_spoof,
+                dst_ip: self.addr.peer_real,
+                payload,
+            },
+            crate::config::TunnelProtocol::Ipip => OutPacket::Ipip {
+                src_ip: self.addr.local_spoof,
+                dst_ip: self.addr.peer_real,
+                payload,
+            },
+            crate::config::TunnelProtocol::Gre => OutPacket::Gre {
+                src_ip: self.addr.local_spoof,
+                dst_ip: self.addr.peer_real,
+                payload,
+            },
+            crate::config::TunnelProtocol::Tcp => {
+                return Err(anyhow!("mux/fec sender used with tcp"));
+            }
+            crate::config::TunnelProtocol::Quic => {
+                return Err(anyhow!("mux/fec sender used with quic"));
+            }
+        };
+
+        self.sender.send(out).await
     }
 }
 
-#[derive(Debug)]
 enum RecvEvent {
     Packet(Bytes),
     Timeout,
     Closed,
 }
 
-fn estimate_mux_size_with_packet(batch: &[Bytes], pkt: &Bytes) -> usize {
-    let mut current_size = 0;
-    for b in batch {
-        current_size += packet_mux_size(b);
+fn estimate_mux_size_with_packet(existing: &[Bytes], next: &Bytes) -> usize {
+    let mut size = HEADER_LEN + 1;
+    for p in existing {
+        size += 2 + p.len();
     }
-    current_size + packet_mux_size(pkt)
-}
-
-fn packet_mux_size(pkt: &Bytes) -> usize {
-    pkt.len() + 2
-}
-
-#[cfg(test)]
-mod tests {
-    // ...
+    size += 2 + next.len();
+    size
 }

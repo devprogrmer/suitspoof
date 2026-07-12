@@ -1,116 +1,131 @@
-//! Helpers for bridging a TUN device to a set of tunnels.
+//! TUN <-> tunnel bridging helpers.
+//!
+//! Provides packet parsing, flow hashing, and a tunnel pool abstraction for
+//! distributing packets across multiple tunnels.
 
-use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Result};
 use arc_swap::ArcSwap;
-use bytes::Bytes;
 use async_channel as mpsc;
+use bytes::Bytes;
 use event_listener::Event;
 
 use crate::tun::TunDevice;
 
-/// A lock-free tunnel pool.
+/// Lock-free tunnel pool.
 ///
-/// Readers (which is most operations) acquire an `ArcSwap` guard. Writes
-/// (add/remove) take a short `std::sync::Mutex` to serialize a snapshot
-/// swap.
+/// Reads (the overwhelming majority of operations) use [`ArcSwap`] which is
+/// a pure pointer load – no mutex, no RwLock.  Writes (add/remove, rare events)
+/// take a short `std::sync::Mutex` only to serialise the snapshot swap.
+#[derive(Clone)]
 pub struct TunnelPool {
-    inner: ArcSwap<Arc<Inner>>,
+    /// Immutable snapshot, swapped atomically on add/remove.
+    handles: Arc<ArcSwap<Vec<TunnelHandle>>>,
+    /// Serialises mutations only.
+    write_lock: Arc<Mutex<()>>,
+    ready: Arc<Event>,
 }
 
-struct Inner {
-    tunnels:     HashMap<u32, TunnelHandle>,
-    next_tunnel: usize,
-    ready:       Event,
-}
-
-#[derive(Debug)]
-pub struct TunnelHandle {
-    pub id:     u32,
-    pub tx:     mpsc::Sender<Bytes>,
-    is_closed:  bool,
+#[derive(Clone)]
+struct TunnelHandle {
+    id: u32,
+    tx: mpsc::Sender<Bytes>,
 }
 
 impl TunnelPool {
     pub fn new() -> Self {
         Self {
-            inner: ArcSwap::from_pointee(Inner {
-                tunnels:     HashMap::new(),
-                next_tunnel: 0,
-                ready:       Event::new(),
-            }),
+            handles: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            write_lock: Arc::new(Mutex::new(())),
+            ready: Arc::new(Event::new()),
         }
     }
 
-    pub fn add_tunnel(&self, id: u32, tx: mpsc::Sender<Bytes>) {
-        let mut inner = self.inner.load().as_ref().clone();
-        log::info!("adding tunnel id={}", id);
-        inner.tunnels.insert(
-            id,
-            TunnelHandle {
-                id,
-                tx,
-                is_closed: false,
-            },
-        );
-        inner.ready.notify_additional(1);
-        self.inner.store(Arc::new(inner));
+    pub async fn add_tunnel(&self, id: u32, tx: mpsc::Sender<Bytes>) {
+        let _guard = self.write_lock.lock().unwrap();
+        let mut new_vec = self.handles.load().as_ref().clone();
+        new_vec.push(TunnelHandle { id, tx });
+        let len = new_vec.len();
+        self.handles.store(Arc::new(new_vec));
+        self.ready.notify(usize::MAX);
+        log::debug!("tunnel pool add id={} total={}", id, len);
     }
 
-    pub fn remove_tunnel(&self, id: u32) {
-        let mut inner = self.inner.load().as_ref().clone();
-        log::info!("removing tunnel id={}", id);
-        inner.tunnels.remove(&id);
-        self.inner.store(Arc::new(inner));
+    pub async fn remove_tunnel(&self, id: u32) {
+        let _guard = self.write_lock.lock().unwrap();
+        let mut new_vec = self.handles.load().as_ref().clone();
+        new_vec.retain(|h| h.id != id);
+        let len = new_vec.len();
+        self.handles.store(Arc::new(new_vec));
+        log::debug!("tunnel pool remove id={} total={}", id, len);
     }
 
-    pub async fn is_empty(&self) -> bool { self.inner.load().tunnels.is_empty() }
+    pub async fn is_empty(&self) -> bool {
+        self.handles.load().is_empty()
+    }
 
     pub async fn wait_ready(&self) {
-        loop {
-            let inner = self.inner.load();
-            if !inner.tunnels.is_empty() {
-                break;
-            }
-            log::info!("waiting for tunnel to become ready...");
-            inner.ready.listen().await;
+        if !self.handles.load().is_empty() {
+            return;
         }
+        let listener = self.ready.listen();
+        if !self.handles.load().is_empty() {
+            return;
+        }
+        listener.await;
     }
 
-    /// Send a packet to a tunnel, chosen by a hash.
+    /// Route a packet to a tunnel selected by `hash` (flow-consistent hashing).
     ///
-    /// This ensures packets from the same flow always go to the same tunnel,
-    /// as long as the set of active tunnels is stable.
-    pub async fn send_hashed(&self, pkt: Bytes, hash: u64) -> Result<()> {
-        let inner = self.inner.load();
-        if inner.tunnels.is_empty() {
-            bail!("no tunnels available");
+    /// The read path is a single atomic pointer load – no locking at all.
+    pub async fn send_hashed(&self, mut pkt: Bytes, hash: u64) -> Result<()> {
+        let mut attempts = 0usize;
+        loop {
+            let snapshot = self.handles.load();
+            if snapshot.is_empty() {
+                bail!("no active tunnels");
+            }
+            let idx = (hash as usize) % snapshot.len();
+            let sender = snapshot[idx].tx.clone();
+            drop(snapshot); // release the guard before the await
+
+            match sender.send(pkt).await {
+                Ok(()) => {
+                    log::trace!("tunnel pool send hash={}", hash);
+                    return Ok(());
+                }
+                Err(e) => {
+                    pkt = e.0;
+                    self.prune_closed();
+                    attempts += 1;
+                    if attempts >= 3 {
+                        bail!("no active tunnels");
+                    }
+                }
+            }
         }
-        // Choose tunnel based on hash to keep flows consistent.
-        let idx = hash as usize % inner.tunnels.len();
-        let h = inner.tunnels.values().nth(idx).unwrap();
-        h.tx.send(pkt).await?;
-        Ok(())
     }
 
-    pub fn prune_closed(&self) {
-        let mut inner = self.inner.load().as_ref().clone();
-        inner.tunnels.retain(|_, h| !h.tx.is_closed());
-        if inner.tunnels.is_empty() {
-            log::warn!("all tunnels closed");
-        }
-        self.inner.store(Arc::new(inner));
+    fn prune_closed(&self) {
+        let _guard = self.write_lock.lock().unwrap();
+        let new_vec: Vec<TunnelHandle> = self
+            .handles
+            .load()
+            .iter()
+            .filter(|h| !h.tx.is_closed())
+            .cloned()
+            .collect();
+        self.handles.store(Arc::new(new_vec));
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct PacketMeta {
-    pub src_ip:  Ipv4Addr,
-    pub dst_ip:  Ipv4Addr,
-    pub proto:   u8,
+    pub src_ip: Ipv4Addr,
+    pub dst_ip: Ipv4Addr,
+    pub proto: u8,
     pub src_port: Option<u16>,
     pub dst_port: Option<u16>,
 }
@@ -190,8 +205,7 @@ pub fn spawn_tun_writer(tun: Arc<TunDevice>, rx: mpsc::Receiver<Bytes>) {
                 log::warn!("tun write: {}", e);
             }
         }
-    })
-    ;
+    });
 }
 
 pub fn spawn_tunnel_to_tun(app_rx: mpsc::Receiver<Bytes>, tx: mpsc::Sender<Bytes>) {
@@ -201,8 +215,7 @@ pub fn spawn_tunnel_to_tun(app_rx: mpsc::Receiver<Bytes>, tx: mpsc::Sender<Bytes
                 break;
             }
         }
-    })
-    ;
+    });
 }
 
 pub async fn run_tun_reader(

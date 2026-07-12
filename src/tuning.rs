@@ -1,227 +1,184 @@
-//! Runtime auto-tuning of suitspoof parameters.
+//! Runtime tuning and system detection.
 
-use std::time::Duration;
+use std::fs;
 
-use serde::Deserialize;
+use crate::config::{Config, PerfMode};
 
-use crate::config::Config;
-
-/// Automatically tune configuration parameters at runtime based on system
-/// characteristics and whether DPI obfuscation is enabled.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Tuning {
-    pub enabled: bool,
-    pub auto_io_threads: bool,
-    pub auto_runtime_threads: bool,
-    pub auto_channel_capacity: bool,
-    pub auto_multiplex_flush_ms: bool,
-    pub auto_multiplex_max_payload: bool,
-    pub auto_fec_group_size: bool,
-    pub auto_heartbeat_interval_secs: bool,
-    pub auto_tunnel_idle_timeout_secs: bool,
+#[derive(Debug, Clone)]
+pub struct SystemProfile {
+    pub cpu_cores: usize,
+    pub mem_gb: f64,
+    pub nic_mbps: Option<u32>,
 }
 
-impl Default for Tuning {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            auto_io_threads: true,
-            auto_runtime_threads: true,
-            auto_channel_capacity: true,
-            auto_multiplex_flush_ms: true,
-            auto_multiplex_max_payload: true,
-            auto_fec_group_size: true,
-            auto_heartbeat_interval_secs: true,
-            auto_tunnel_idle_timeout_secs: true,
-        }
-    }
+#[derive(Debug, Clone)]
+pub struct TuningSummary {
+    pub profile: SystemProfile,
+    pub perf_mode: PerfMode,
+    pub runtime_worker_threads: usize,
+    pub tunnel_count: usize,
+    pub channel_capacity: usize,
+    pub io_channel_capacity: usize,
+    pub enable_multiplex: bool,
+    pub multiplex_flush_ms: u64,
+    pub multiplex_max_payload: usize,
 }
 
-#[derive(Debug)]
-pub enum AutoTuneReason {
-    DpiEnabled,
-    DpiEnabledSuit,
-    InitialSetup,
-}
+pub fn detect_system_profile(interface: &str) -> SystemProfile {
+    let cpu_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
 
-#[derive(Debug)]
-pub struct TuningSummary(Vec<String>);
+    let mem_gb = read_mem_gb().unwrap_or(1.0);
+    let nic_mbps = read_nic_speed_mbps(interface);
 
-impl TuningSummary {
-    pub fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    pub fn add(&mut self, line: String) {
-        self.0.push(line);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn lines(&self) -> impl Iterator<Item = &String> {
-        self.0.iter()
+    SystemProfile {
+        cpu_cores,
+        mem_gb,
+        nic_mbps,
     }
 }
 
 pub fn apply_auto_tune(cfg: &mut Config) -> Option<TuningSummary> {
-    if !cfg.tuning.as_ref().map_or(false, |t| t.enabled) {
+    if !cfg.auto_tune {
         return None;
     }
 
-    let mut summary = TuningSummary::new();
-    let tuning = cfg.tuning.as_ref().unwrap();
-    let mut reason = AutoTuneReason::InitialSetup;
+    let profile = detect_system_profile(&cfg.interface);
 
-    if cfg.dpi_obfuscation {
-        reason = AutoTuneReason::DpiEnabled;
+    let runtime_worker_threads =
+        tune_worker_threads(cfg.runtime_worker_threads, cfg.perf_mode, &profile);
+    cfg.runtime_worker_threads = runtime_worker_threads;
 
-        let uplink = cfg.uplink_protocol.as_str().to_ascii_lowercase();
-        let downlink = cfg.downlink_protocol.as_str().to_ascii_lowercase();
+    let (tunnels, chan_cap, io_cap) = tune_channels(cfg.perf_mode, &profile);
+    cfg.tunnel_count = tunnels;
+    cfg.channel_capacity = chan_cap;
+    cfg.io_channel_capacity = io_cap;
 
-        if uplink.contains("suit") || downlink.contains("suit") {
-            reason = AutoTuneReason::DpiEnabledSuit;
-        }
-    }
+    let (enable_mux, flush_ms, max_payload) = tune_mux(cfg.perf_mode, cfg.mtu);
+    cfg.enable_multiplex = enable_mux;
+    cfg.multiplex_flush_ms = flush_ms;
+    cfg.multiplex_max_payload = max_payload;
 
-    match reason {
-        AutoTuneReason::DpiEnabled => {
-            if tuning.auto_io_threads {
-                cfg.io_channel_capacity = 256;
-                summary.add("io_channel_capacity = 256 (DPI enabled)".to_string());
-            }
-            if tuning.auto_heartbeat_interval_secs {
-                cfg.heartbeat_interval_secs = 2;
-                summary.add("heartbeat_interval_secs = 2 (DPI enabled)".to_string());
-            }
-            if tuning.auto_tunnel_idle_timeout_secs {
-                cfg.tunnel_idle_timeout_secs = 10;
-                summary.add("tunnel_idle_timeout_secs = 10 (DPI enabled)".to_string());
-            }
-        }
-        AutoTuneReason::DpiEnabledSuit => {
-            if tuning.auto_io_threads {
-                cfg.io_channel_capacity = 512;
-                summary.add("io_channel_capacity = 512 (DPI enabled, suit-specific)".to_string());
-            }
-            if tuning.auto_heartbeat_interval_secs {
-                cfg.heartbeat_interval_secs = 1;
-                summary.add("heartbeat_interval_secs = 1 (DPI enabled, suit-specific)".to_string());
-            }
-            if tuning.auto_tunnel_idle_timeout_secs {
-                cfg.tunnel_idle_timeout_secs = 5;
-                summary.add("tunnel_idle_timeout_secs = 5 (DPI enabled, suit-specific)".to_string());
-            }
-        }
-        AutoTuneReason::InitialSetup => {}
-    }
-
-    if summary.is_empty() {
-        None
-    } else {
-        Some(summary)
-    }
+    Some(TuningSummary {
+        profile,
+        perf_mode: cfg.perf_mode,
+        runtime_worker_threads,
+        tunnel_count: cfg.tunnel_count,
+        channel_capacity: cfg.channel_capacity,
+        io_channel_capacity: cfg.io_channel_capacity,
+        enable_multiplex: cfg.enable_multiplex,
+        multiplex_flush_ms: cfg.multiplex_flush_ms,
+        multiplex_max_payload: cfg.multiplex_max_payload,
+    })
 }
 
 pub fn effective_runtime_threads(cfg: &Config) -> usize {
-    if cfg.tuning.as_ref().map_or(false, |t| !t.auto_runtime_threads) {
-        return cfg.runtime_threads;
+    if cfg.runtime_worker_threads > 0 {
+        return cfg.runtime_worker_threads;
     }
 
-    std::cmp::max(1, num_cpus::get_physical() / 2)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .max(1)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::{Role, TunnelProtocol};
-    use std::net::Ipv4Addr;
+fn tune_worker_threads(current: usize, mode: PerfMode, profile: &SystemProfile) -> usize {
+    if current > 0 {
+        return current;
+    }
 
-    fn default_config() -> Config {
-        Config {
-            role: Role::Client,
-            log_level: "info".to_string(),
-            listen_addr: "0.0.0.0:0".parse().unwrap(),
-            peer_addr: "127.0.0.1:0".parse().unwrap(),
-            peer_real_ip: Ipv4Addr::new(10, 0, 0, 1),
-            peer_spoofed_ip: Ipv4Addr::new(10, 0, 0, 2),
-            tun_name: "tun0".to_string(),
-            tun_mtu: 1500,
-            tun_ip: Ipv4Addr::new(10, 0, 0, 3),
-            tun_peer_ip: Ipv4Addr::new(10, 0, 0, 4),
-            tun_cidr: 24,
-            dns_servers: vec![],
-            uplink_protocol: TunnelProtocol::Udp,
-            downlink_protocol: TunnelProtocol::Udp,
-            data_port: 12345,
-            data_port_shuffle: false,
-            data_port_range: (0, 0),
-            xor_key: "".to_string(),
-            dpi_obfuscation: false,
-            tls_cert_path: "".to_string(),
-            tls_key_path: "".to_string(),
-            tls_ca_cert_path: "".to_string(),
-            allowed_peers: vec![],
-            tunnel_idle_timeout_secs: 300,
-            handshake_timeout_secs: 10,
-            heartbeat_interval_secs: 10,
-            channel_capacity: 100,
-            io_channel_capacity: 100,
-            runtime_threads: 0,
-            icmp_id: 0,
-            random_icmp_id: false,
-            enable_multiplex: false,
-            multiplex_flush_ms: 0,
-            multiplex_max_payload: 0,
-            enable_fec: false,
-            fec_group_size: 0,
-            tuning: Some(Tuning::default()),
-            check_mode: false,
-            check_ips_path: "".to_string(),
-            check_output_path: "".to_string(),
-            check_timeout: Duration::from_secs(0),
-            check_workers: 0,
+    let cores = profile.cpu_cores.max(1);
+    // Use all available cores for throughput/balanced; cap latency mode to
+    // avoid context-switch noise on a few cores.
+    match mode {
+        PerfMode::Throughput => cores.max(2),
+        PerfMode::Latency => cores.min(4).max(2),
+        PerfMode::Balanced => cores.max(2), // removed artificial cap of 8
+    }
+}
+
+fn tune_channels(mode: PerfMode, profile: &SystemProfile) -> (usize, usize, usize) {
+    let cores = profile.cpu_cores.max(1);
+    let nic = profile.nic_mbps.unwrap_or(1000) as usize;
+
+    let base_tunnels = match mode {
+        PerfMode::Throughput => (cores * 2).max(4),
+        PerfMode::Latency => (cores / 2).max(1),
+        PerfMode::Balanced => cores.max(2),
+    };
+
+    // Boost tunnel count proportionally with NIC speed.
+    let nic_boost = if nic >= 10000 {
+        4
+    } else if nic >= 5000 {
+        3
+    } else if nic >= 2000 {
+        2
+    } else if nic >= 1000 {
+        1
+    } else {
+        0
+    };
+    // Raised cap from 16 → 64 to support high-core / high-speed deployments.
+    let tunnel_count = (base_tunnels + nic_boost).min(64).max(1);
+
+    let base_capacity = match mode {
+        PerfMode::Throughput => 8192,
+        PerfMode::Latency => 2048,
+        PerfMode::Balanced => 4096,
+    };
+
+    let mem_mult = if profile.mem_gb >= 32.0 {
+        8
+    } else if profile.mem_gb >= 16.0 {
+        4
+    } else if profile.mem_gb >= 8.0 {
+        2
+    } else {
+        1
+    };
+
+    let channel_capacity = (base_capacity * mem_mult).max(512);
+    // I/O queue should be at least 2× the per-tunnel channel to avoid back-pressure
+    // when multiple tunnels are all active simultaneously.
+    let io_channel_capacity = (channel_capacity * 2).max(1024);
+
+    (tunnel_count, channel_capacity, io_channel_capacity)
+}
+
+fn tune_mux(mode: PerfMode, mtu: usize) -> (bool, u64, usize) {
+    // Allow the mux payload to use the full MTU budget.
+    let max_payload = mtu.min(1400).max(256);
+    match mode {
+        // Throughput: aggressive batching; 1 ms flush keeps latency tolerable
+        // while still amortising per-packet syscall overhead.
+        PerfMode::Throughput => (true, 1, max_payload),
+        // Latency: disable mux so every packet is sent immediately.
+        PerfMode::Latency => (false, 1, max_payload.min(900)),
+        // Balanced: light batching with a 1 ms flush window.
+        PerfMode::Balanced => (true, 1, max_payload),
+    }
+}
+
+fn read_mem_gb() -> Option<f64> {
+    let data = fs::read_to_string("/proc/meminfo").ok()?;
+    for line in data.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() >= 2 {
+                if let Ok(kb) = parts[0].parse::<f64>() {
+                    return Some(kb / 1024.0 / 1024.0);
+                }
+            }
         }
     }
+    None
+}
 
-    #[test]
-    fn test_apply_auto_tune_initial_setup() {
-        let mut cfg = default_config();
-        cfg.dpi_obfuscation = false;
-        let summary = apply_auto_tune(&mut cfg);
-        assert!(summary.is_none());
-    }
-
-    #[test]
-    fn test_apply_auto_tune_dpi_enabled() {
-        let mut cfg = default_config();
-        cfg.dpi_obfuscation = true;
-        let summary = apply_auto_tune(&mut cfg).unwrap();
-        assert!(!summary.is_empty());
-        assert_eq!(cfg.io_channel_capacity, 256);
-        assert_eq!(cfg.heartbeat_interval_secs, 2);
-        assert_eq!(cfg.tunnel_idle_timeout_secs, 10);
-    }
-
-    #[test]
-    fn test_effective_runtime_threads_auto_tuned() {
-        let mut cfg = default_config();
-        cfg.tuning = Some(Tuning {
-            auto_runtime_threads: true,
-            ..Tuning::default()
-        });
-        assert!(effective_runtime_threads(&cfg) > 0);
-    }
-
-    #[test]
-    fn test_effective_runtime_threads_manual() {
-        let mut cfg = default_config();
-        cfg.tuning = Some(Tuning {
-            auto_runtime_threads: false,
-            ..Tuning::default()
-        });
-        cfg.runtime_threads = 8;
-        assert_eq!(effective_runtime_threads(&cfg), 8);
-    }
+fn read_nic_speed_mbps(interface: &str) -> Option<u32> {
+    let path = format!("/sys/class/net/{}/speed", interface);
+    let data = fs::read_to_string(path).ok()?;
+    data.trim().parse::<u32>().ok()
 }

@@ -1,7 +1,7 @@
 //! SOCKS5 proxy server (client side only).
 //!
 //! Accepts local TCP connections on `cfg.socks5_port`, performs the SOCKS5
-//! handshake, and relays data bidirectionally through a suitspoof tunnel.
+//! handshake, and relays data bidirectionally through a CandyTunnel tunnel.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,21 +17,21 @@ use crate::config::Config;
 use crate::tunnel::TunnelManager;
 
 // SOCKS5 constants
-const SOCKS_VER:            u8 = 0x05;
-const NO_AUTH:              u8 = 0x00;
-const NO_ACCEPTABLE_AUTH:   u8 = 0xFF;
-const CMD_CONNECT:          u8 = 0x01;
-const ATYP_IPV4:            u8 = 0x01;
-const ATYP_DOMAIN:          u8 = 0x03;
-const ATYP_IPV6:            u8 = 0x04;
-const REP_SUCCESS:          u8 = 0x00;
-const REP_GENERAL_FAIL:     u8 = 0x01;
-const REP_CMD_UNSUPPORTED:  u8 = 0x07;
-const REP_ATYP_UNSUPPORTED: u8 = 0x08;
+const SOCKS_VER:          u8 = 0x05;
+const NO_AUTH:            u8 = 0x00;
+const NO_ACCEPTABLE_AUTH: u8 = 0xFF;
+const CMD_CONNECT:        u8 = 0x01;
+const ATYP_IPV4:          u8 = 0x01;
+const ATYP_DOMAIN:        u8 = 0x03;
+const ATYP_IPV6:          u8 = 0x04;
+const REP_SUCCESS:        u8 = 0x00;
+const REP_GENERAL_FAIL:   u8 = 0x01;
+const REP_CMD_UNSUPPORTED:u8 = 0x07;
+const REP_ATYP_UNSUPPORTED:u8 = 0x08;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-/// Bind and run the SOCKS5 proxy. Never returns unless an error occurs.
+/// Bind and run the SOCKS5 proxy.  Never returns unless an error occurs.
 pub async fn run_socks5(cfg: Arc<Config>, manager: TunnelManager) -> Result<()> {
     let bind = SocketAddr::from(([127, 0, 0, 1], cfg.socks5_port));
     let listener = TcpListener::bind(bind)
